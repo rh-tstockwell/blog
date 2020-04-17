@@ -66,8 +66,7 @@ I will showcase a simple series of CI/CD pipelines using [OpenShift and Jenkins 
 ## Set up continuous delivery for multiple environments
 
 Lastly, we need to reconfigure the CD pipelines we created in the previous step to add the ability to deploy to multiple environments.
-I like to keep this step separate from the previous one as it usually involves extra steps, configuration, and templating of the k8s resources.
-You can also implement this step in many ways.
+I like to keep this step separate from the previous one as it usually involves extra steps, configuration, and templating of the k8s resources. You can also implement this step in many ways.
 
 In Part 4 of this series, I will show how to implement a basic multi-environment CD pipeline in Jenkins with no external software.
 
