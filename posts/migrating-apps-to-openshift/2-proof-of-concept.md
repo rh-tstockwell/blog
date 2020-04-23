@@ -48,9 +48,6 @@ $ oc new-app --template mongodb-persistent --name mongodb
     service "mongodb" created
     deploymentconfig.apps.openshift.io "mongodb" created
 --> Success
-    Application is not exposed. You can expose services to the outside world by executing one or more of the commands below:
-     'oc expose svc/mongodb'
-    Run 'oc status' to view your app.
 ```
 
 ```console
@@ -117,8 +114,8 @@ And there it is, a pre-populated MongoDB database running on OpenShift!
 - Initial build from `master` with nodejs s2i
 
 ```console
-$ oc new-app 'nodejs:10~https://github.com/rh-tstockwell/bookinfo.git#master' --context-dir src/ratings --name ratings
---> Found image 0d01232 (7 months old) in image stream "openshift/nodejs" under tag "10" for "nodejs:10"
+$ oc new-app 'nodejs~https://github.com/rh-tstockwell/bookinfo.git#master' --context-dir src/ratings --name ratings
+--> Found image 0d01232 (7 months old) in image stream "openshift/nodejs" under tag "10" for "nodejs"
 ...
 --> Creating resources ...
     imagestream.image.openshift.io "ratings" created
@@ -126,10 +123,6 @@ $ oc new-app 'nodejs:10~https://github.com/rh-tstockwell/bookinfo.git#master' --
     deploymentconfig.apps.openshift.io "ratings" created
     service "ratings" created
 --> Success
-    Build scheduled, use 'oc logs -f bc/ratings' to track its progress.
-    Application is not exposed. You can expose services to the outside world by executing one or more of the commands below:
-     'oc expose svc/ratings'
-    Run 'oc status' to view your app.
 ```
 
 ```console
@@ -209,7 +202,7 @@ svc/ratings - x.x.x.x:8080
 
 - Appears to be running, check by exposing service and hitting up an endpoint
 
-```
+```console
 $ oc expose svc ratings
 route.route.openshift.io/ratings exposed
 
@@ -278,3 +271,74 @@ $ curl "http://$host/ratings/1"
 
 - Note that in the real world we'd probably just make an update and push our code to master.
   I've just used tags here to demostrate all the different changes for this blog.
+
+## Details Service (Ruby)
+
+- Start with initial deploy to OpenShift
+
+```console
+$ oc new-app 'ruby~https://github.com/rh-tstockwell/bookinfo.git#master' --context-dir src/details --name details
+--> Found image 18a91a0 (11 months old) in image stream "openshift/ruby" under tag "2.5" for "ruby"
+...
+--> Creating resources ...
+    imagestream.image.openshift.io "details" created
+    buildconfig.build.openshift.io "details" created
+    deploymentconfig.apps.openshift.io "details" created
+    service "details" created
+--> Success
+
+$ oc status
+svc/details - x.x.x.x:8080
+  dc/details deploys istag/details:latest <-
+    bc/details source builds https://github.com/rh-tstockwell/bookinfo.git#master on openshift/ruby:2.5
+    deployment #1 deployed 2 minutes ago - 0/1 pods (warning: 4 restarts)
+...
+Errors:
+  * pod/details-1-w7cqw is crash-looping
+```
+
+- Appears to have failed, let's find out why
+
+```console
+$ oc logs dc/details
+You might consider adding 'puma' into your Gemfile.
+ERROR: Rubygem Rack is not installed in the present image.
+       Add rack to your Gemfile in order to start the web server.
+```
+
+- Odd. Looks like our app doesn't conform to the defaults required by the ruby s2i image.
+- Tried looking for doco here: https://github.com/sclorg/s2i-ruby-container/tree/master/2.5, didn't find anything useful
+- Check the source code instead
+- https://github.com/sclorg/s2i-ruby-container/blob/master/2.5/s2i/bin/run
+- Looks like it's expected to be a rack app, but ours is not
+- To fix this, let's completely override the default ruby run script with a script that will run our app the way we need
+- https://docs.openshift.com/container-platform/3.11/using_images/s2i_images/customizing_s2i_images.html
+- View the .s2i/bin/run script: todo: add link
+- Update the git ref to point to one I've already completed
+
+```console
+$ oc patch bc details -p "$(cat src/details/patches/1-bc-ref.yml)"
+buildconfig.build.openshift.io/details patched
+
+$ oc start-build details
+build.build.openshift.io/details-2 started
+
+$ oc status
+svc/details - x.x.x.x:8080
+  dc/details deploys istag/details:latest <-
+    bc/details source builds https://github.com/rh-tstockwell/bookinfo.git#blog/2/details on openshift/ruby:2.5
+    deployment #2 running for 28 seconds - 1 pod
+    deployment #1 deployed 18 minutes ago
+...
+```
+
+- Looks like it worked, let's check the api
+
+```console
+$ oc expose svc details 
+route.route.openshift.io/details exposed
+
+$ host="$(oc get route details --template '{{.spec.host}}')"
+$ curl "http://$host/details/1"
+{"id":1,"author":"William Shakespeare","year":1595,"type":"paperback","pages":200,"publisher":"PublisherA","language":"English","ISBN-10":"1234567890","ISBN-13":"123-1234567890"}
+```
