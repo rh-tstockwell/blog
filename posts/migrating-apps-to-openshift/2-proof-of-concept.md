@@ -21,7 +21,7 @@ This will checkout develop branch by default, commands lower down will make sure
 
 Unless otherwise specified, I use the following commands regularly to check the status and progress of builds & deployments:
 
-- **`oc status`** - Gives a general overview of the entire project.
+- **`oc status`** - Gives a general overview of the entire project. 
 - **`oc get pods`** - Shows the name & status of all Pods in the project.
 - **`oc logs -f bc/<app>`** - Follows the logs of the current build Pod for `<app>`.
 - **`oc logs -f dc/<app>`** - Follows the logs of the deployment/deployed Pod for `<app>`.
@@ -43,10 +43,6 @@ This template will instantiate all k8s resources, including persistent storage, 
 $ oc new-app --template mongodb-persistent --name mongodb
 --> Deploying template "openshift/mongodb-ephemeral" to project bookinfo
 ...
---> Creating resources ...
-    secret "mongodb" created
-    service "mongodb" created
-    deploymentconfig.apps.openshift.io "mongodb" created
 --> Success
 ```
 
@@ -117,11 +113,6 @@ And there it is, a pre-populated MongoDB database running on OpenShift!
 $ oc new-app 'nodejs~https://github.com/rh-tstockwell/bookinfo.git#master' --context-dir src/ratings --name ratings
 --> Found image 0d01232 (7 months old) in image stream "openshift/nodejs" under tag "10" for "nodejs"
 ...
---> Creating resources ...
-    imagestream.image.openshift.io "ratings" created
-    buildconfig.build.openshift.io "ratings" created
-    deploymentconfig.apps.openshift.io "ratings" created
-    service "ratings" created
 --> Success
 ```
 
@@ -280,11 +271,6 @@ $ curl "http://$host/ratings/1"
 $ oc new-app 'ruby~https://github.com/rh-tstockwell/bookinfo.git#master' --context-dir src/details --name details
 --> Found image 18a91a0 (11 months old) in image stream "openshift/ruby" under tag "2.5" for "ruby"
 ...
---> Creating resources ...
-    imagestream.image.openshift.io "details" created
-    buildconfig.build.openshift.io "details" created
-    deploymentconfig.apps.openshift.io "details" created
-    service "details" created
 --> Success
 
 $ oc status
@@ -342,3 +328,226 @@ $ host="$(oc get route details --template '{{.spec.host}}')"
 $ curl "http://$host/details/1"
 {"id":1,"author":"William Shakespeare","year":1595,"type":"paperback","pages":200,"publisher":"PublisherA","language":"English","ISBN-10":"1234567890","ISBN-13":"123-1234567890"}
 ```
+
+## Reviews Service (Java + Gradle)
+
+- Have a JEE Application, needs to run in an JEE server container - e.g. wildfly
+- if it doesn't exist (use `oc get is -n openshift | grep wildfly` to check), either ask your ocp admin to add it (https://github.com/wildfly/wildfly-s2i) or create the imagestreams locally in your project yourself
+
+```console
+$ cd $(mktemp -d)
+$ git clone https://github.com/wildfly/wildfly-s2i.git
+$ cd wildfly-s2i
+$ oc create -f templates
+imagestream.image.openshift.io/wildfly created
+imagestream.image.openshift.io/wildfly-runtime created
+template.template.openshift.io/wildfly-s2i-chained-build-template created
+```
+
+- Run oc new-app
+
+``` console
+$ oc new-app 'wildfly~https://github.com/rh-tstockwell/bookinfo.git#master' --context-dir src/reviews --name reviews
+--> Found image bdf6490 (4 weeks old) in image stream "bookinfo/wildfly" under tag "latest" for "wildfly"
+...
+--> Success
+
+$ oc status
+...
+svc/reviews - 172.30.88.245 ports 8080, 8778
+  dc/reviews deploys istag/reviews:latest <-
+    bc/reviews source builds https://github.com/rh-tstockwell/bookinfo.git#master on istag/wildfly:latest
+    deployment #1 deployed 2 minutes ago - 1 pod
+```
+
+- Looks ok at first glance, let's check the api
+
+```console
+$ oc expose svc reviews
+route.route.openshift.io/reviews exposed
+
+$ host="$(oc get route reviews --template '{{.spec.host}}')"
+$ curl "http://$host/reviews/1"
+<html><head><title>Error</title></head><body>404 - Not Found</body></html>
+```
+
+- Hmmm, that's not right, let's check the logs
+
+```console
+$ oc logs dc/details
+...
+
+$ oc logs bc/details
+...
+INFO S2I source build with plain binaries detected
+INFO Copying deployments from . to /deployments...
+...
+```
+
+- Nothing jumps out in the `dc` logs - though there are signs something is amiss. There are no logs adding/starting the `war` file that should be built by the build
+- In the `bc` logs however, something seems wrong. It seems to think it should be doing a binary s2i deployment, but we want it to build from source. What's going on?
+- The s2i image doens't work with gradle, and assumed a binary build when it didn't find a `pom.xml`
+- We know we can customise the `run` script of an s2i image, but we can also customise the `assemble` script
+- Let's customise it to handle gradle
+- First, however, we need to add the gradle wrapper to the code so we can run gradle from anywhere
+- Follow the instructions at https://docs.gradle.org/current/userguide/gradle_wrapper.html
+- Wanted to use the code from the s2i image script in my script, so tried to find it.
+- It's just a yaml file though, https://github.com/wildfly/wildfly-s2i/blob/master/wildfly-builder-image/image.yaml, looks like it's using https://github.com/cekit/cekit
+- According to README, https://github.com/wildfly/wildfly-cekit-modules holds most of the modules. We're after those related to s2i
+- https://github.com/wildfly/wildfly-cekit-modules/blob/master/jboss/container/wildfly/s2i/bash/module.yaml looks to be the right one, it's installing `jboss.container.maven.s2i.bash`
+  - is found in the other linked repo: https://github.com/jboss-openshift/cct_module/tree/master/jboss/container/maven/s2i
+- Assemble script: https://github.com/jboss-openshift/cct_module/blob/master/jboss/container/maven/s2i/artifacts/usr/local/s2i/assemble
+- Helper functions: https://github.com/jboss-openshift/cct_module/blob/master/jboss/container/maven/s2i/artifacts/opt/jboss/container/maven/s2i/maven-s2i
+- Here is the new `assemble` script I developed (link to repo)
+- It uses the most of the same functions as the original `assemble` script, but changes the build to a customiseable gradle build
+- Notice it still uses the copy artifacts function, so now we have to update the `MAVEN_S2I_ARTIFACT_DIRS` to the output of our build at `reviews-application/build/libs`
+- As before, this value will not change per deploy environment so we'll set it in `.s2i/environment`
+
+- Update our ref to these changes
+
+```console
+$ oc patch bc reviews -p "$(cat src/reviews/patches/1-bc-ref.yml)"
+buildconfig.build.openshift.io/reviews patched
+
+$ oc start-build reviews
+build.build.openshift.io/reviews-2 started
+```
+
+- Check the logs to make sure things worked
+
+``` console
+$ oc logs bc/reviews
+...
+Welcome to Gradle 6.1.1!
+...
+BUILD SUCCESSFUL in 41s
+...
+
+$ oc logs dc/reviews
+...
+14:32:14,560 INFO  [org.jboss.as.server.deployment] (MSC service thread 1-1) WFLYSRV0027: Starting deployment of "reviews-application-1.0.war" (runtime-name: "reviews-application-1.0.war")
+...
+14:32:30,751 INFO  [org.jboss.resteasy.resteasy_jaxrs.i18n] (ServerService Thread Pool -- 80) RESTEASY002225: Deploying javax.ws.rs.core.Application: class application.ReviewsApplication
+...
+14:32:30,968 INFO  [org.wildfly.extension.undertow] (ServerService Thread Pool -- 80) WFLYUT0021: Registered web context: '/reviews-application-1.0' for server 'default-server'
+14:32:31,349 INFO  [org.jboss.as.server] (ServerService Thread Pool -- 46) WFLYSRV0010: Deployed "reviews-application-1.0.war" (runtime-name : "reviews-application-1.0.war")
+...
+```
+
+- Looks like it worked. Though there may be one problem left due to , let's try hitting up the api
+
+```console
+$ curl "http://$host/reviews/1"
+<html><head><title>Error</title></head><body>404 - Not Found</body></html>
+```
+
+- Hmmm, still not quite there. Hint from `Registered web context: '/reviews-application-1.0'`, so let's try it:
+
+```console
+$ curl "http://$host/reviews-application-1.0/reviews/1"
+{"id": "1","reviews": [{  "reviewer": "Reviewer1",  "text": "An extremely entertaining play by Shakespeare. The slapstick humour is refreshing!"},{  "reviewer": "Reviewer2",  "text": "Absolutely fun and entertaining. The play lacks thematic depth when compared to other plays by Shakespeare."}]}
+```
+
+- Progress! Now we just have to deploy our application in to the root context of the JEE server
+- Easiest way to do that is to name the war file ROOT.war for when it is deployed (it is part of the JEE Servlet Spec) (link?)
+- We'll do this by updating `reviews-application/build.gradle` - link to diff
+- Now update the build git ref to use these changes as well
+
+```console
+$ oc patch bc reviews -p "$(cat src/reviews/patches/2-bc-ref.yml)"
+buildconfig.build.openshift.io/reviews patched
+
+$ oc start-build reviews
+build.build.openshift.io/reviews-3 started
+
+$ curl "http://$host/reviews/1"
+{"id": "1","reviews": [{  "reviewer": "Reviewer1",  "text": "An extremely entertaining play by Shakespeare. The slapstick humour is refreshing!"},{  "reviewer": "Reviewer2",  "text": "Absolutely fun and entertaining. The play lacks thematic depth when compared to other plays by Shakespeare."}]}
+```
+
+- Done!
+
+## Product Page (Python)
+
+- try oc new-app
+
+```console
+$ oc new-app 'python~https://github.com/rh-tstockwell/bookinfo.git#master' --context-dir src/productpage --name productpage
+--> Found image 75e59ae (11 months old) in image stream "openshift/python" under tag "3.6" for "python"
+...
+--> Success
+
+$ oc status
+...
+svc/productpage - x.x.x.x:8080
+  dc/productpage deploys istag/productpage:latest <-
+    bc/productpage source builds https://github.com/rh-tstockwell/bookinfo.git#master on openshift/python:3.6
+    deployment #1 failed 18 minutes ago: config change
+...
+
+$ oc logs dc/productpage
+ERROR: don't know how to run your application.
+Please set either APP_MODULE, APP_FILE or APP_SCRIPT environment variables, or create a file 'app.py' to launch your application.
+```
+
+- needs a proper entrypoint
+- [docs](https://github.com/sclorg/s2i-python-container/tree/master/3.6) tell us to use APP_SCRIPT (default app.sh) to run arbitrary script
+- simple bash script will do, check out the code here: todo: link to bookinfo repo tag
+- apply patch to new ref
+
+```console
+$ oc patch bc productpage -p "$(cat src/productpage/.k8s/patches/1-bc-ref.yml)"
+buildconfig.build.openshift.io/productpage patched
+
+$ oc start-build productpage
+build.build.openshift.io/productpage-2 started
+
+$ oc status
+...
+svc/productpage - x.x.x.x:8080
+  dc/productpage deploys istag/productpage:latest <-
+    bc/productpage source builds https://github.com/rh-tstockwell/bookinfo.git#blog/2/productpage-1 on openshift/python:3.6
+    deployment #3 deployed about a minute ago - 1 pod
+    deployment #2 deployed 18 minutes ago
+    deployment #1 failed 39 minutes ago: config change
+...
+```
+
+- that looks better, let's open the ui and see how if it works
+
+```console
+$ oc expose svc productpage
+route.route.openshift.io/productpage exposed
+```
+
+- Look up the page, insert screenshot, notice errors
+- Check the logs:
+
+```console
+$ oc logs dc/productpage
+...
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): details:9080
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): reviews:9080
+DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): reviews:9080
+...
+```
+
+- Looks like we need to fix up the URLs
+- We can use the `SERVICES_DOMAIN` envvar to pick up the services, the hostnames should all match
+- Looks like the ports are currently harcoded to 9080 though, so we'll need to fix that
+- May as well just hard code it for now, get it up and running and all that
+- View the changes here: todo: add link to changes
+- Apply the patch to the bc for latest version as well as patch to the dc for the services domain envvar (this changes per env so should be in dc not `.s2i/environment`)
+
+```console
+$ oc patch dc productpage -p "$(cat src/productpage/.k8s/patches/2-dc-domain.yml)"
+deploymentconfig.apps.openshift.io/productpage patched
+
+$ oc patch bc productpage -p "$(cat src/productpage/.k8s/patches/3-bc-ref.yml)"
+buildconfig.build.openshift.io/productpage patched
+
+$ oc start-build productpage
+build.build.openshift.io/productpage-3 started
+```
+
+- Test it out again in the browser
+- et voilà
