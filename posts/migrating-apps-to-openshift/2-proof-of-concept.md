@@ -220,7 +220,7 @@ $ curl "http://$host/ratings/1"
 
 - Yay! However, we're not actually hooked up to the database just yet. To do so we need to make sure the `SERVICE_VERSION` environment variable is set to `v2` and set the `MONGO_DB_URL` environment variable to point to our mongodb service.
 
-- `MONGO_DB_URL`: `mongodb.bookinfo.svc:27017` -> due to the default [DNS-based service discovery](https://docs.openshift.com/container-platform/3.11/architecture/networking/networking.html#architecture-additional-concepts-openshift-dns) for services
+- Due to the default [DNS-based service discovery](https://docs.openshift.com/container-platform/3.11/architecture/networking/networking.html#architecture-additional-concepts-openshift-dns) for services, can just use `mongodb:27017`.
 
 ```console
 $ oc patch dc ratings -p "$(cat .k8s/patches/2-dc-mongo.yml)"
@@ -489,6 +489,25 @@ $ curl "http://$host/reviews/1"
 {"id": "1","reviews": [{  "reviewer": "Reviewer1",  "text": "An extremely entertaining play by Shakespeare. The slapstick humour is refreshing!"},{  "reviewer": "Reviewer2",  "text": "Absolutely fun and entertaining. The play lacks thematic depth when compared to other plays by Shakespeare."}]}
 ```
 
+- Now, we want it to be able to hit the ratings service, so need the following env vars (todo: add link from docs or code):
+  - `ENABLE_RATINGS`: true
+- Checking the code, will also need to fix the hard coded 9080 port
+
+```console
+$ oc patch dc reviews -p "$(cat .k8s/patches/3-dc-ratings.yml)"
+buildconfig.build.openshift.io/reviews patched
+
+$ oc patch bc reviews -p "$(cat .k8s/patches/4-bc-ref.yml)"
+buildconfig.build.openshift.io/reviews patched
+
+$ oc start-build reviews
+build.build.openshift.io/reviews-3 started
+
+$ curl "http://$host/reviews/1"
+{"id": "1","reviews": [{  "reviewer": "Reviewer1",  "text": "An extremely entertaining play by Shakespeare. The slapstick humour is refreshing!", "rating": {"stars": 5, "color": "black"}},{  "reviewer": "Reviewer2",  "text": "Absolutely fun and entertaining. The play lacks thematic depth when compared to other plays by Shakespeare.", "rating": {"stars": 4, "color": "black"}}]}
+```
+
+- Notice our reviews now include ratings
 - Done!
 
 ## Product Page (Python)
@@ -544,6 +563,8 @@ svc/productpage - x.x.x.x:8080
 
 - that looks better, let's open the ui and see how if it works
 
+![Product page error!](../../images/migrating-apps-to-openshift/productpage-error.png)
+
 ```console
 $ oc expose svc productpage
 route.route.openshift.io/productpage exposed
@@ -562,17 +583,13 @@ DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): reviews:9080
 ```
 
 - Looks like we need to fix up the URLs
-- We can use the `SERVICES_DOMAIN` envvar to pick up the services, the hostnames should all match
-- Looks like the ports are currently harcoded to 9080 though, so we'll need to fix that
+- Looks like the ports are currently harcoded to 9080, so we'll need to fix that
 - May as well just hard code it for now, get it up and running and all that
 - View the changes here: todo: add link to changes
-- Apply the patch to the bc for latest version as well as patch to the dc for the services domain envvar (this changes per env so should be in dc not `.s2i/environment`)
+- Apply the patch to the bc for latest version
 
 ```console
-$ oc patch dc productpage -p "$(cat .k8s/patches/2-dc-domain.yml)"
-deploymentconfig.apps.openshift.io/productpage patched
-
-$ oc patch bc productpage -p "$(cat .k8s/patches/3-bc-ref.yml)"
+$ oc patch bc productpage -p "$(cat .k8s/patches/2-bc-ref.yml)"
 buildconfig.build.openshift.io/productpage patched
 
 $ oc start-build productpage
@@ -580,10 +597,14 @@ build.build.openshift.io/productpage-3 started
 ```
 
 - Test it out again in the browser
+
+![Product page success!](../../images/migrating-apps-to-openshift/productpage-success.png)
+
 - et voilà
 
 ## To Do
 
+- Move envvars to deploymentconfig patch, ecept for reviews `MAVEN_S2I_ARTIFACT_DIRS`
 - Double check repo links
 - Make reviews use ratings service
 - Link to actual istio documentation for envvars etc for the actual services
