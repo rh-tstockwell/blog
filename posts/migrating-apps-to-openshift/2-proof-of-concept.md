@@ -6,13 +6,18 @@ I will showcase Kubernetes (k8s) YAML changes using [oc patch](https://docs.open
 
 ## Getting Started
 
-First up we make sure to have a bookinfo project setup on OpenShift and locally check out the bookinfo repository from GitHub.
+First up we make sure to have a bookinfo project setup on OpenShift and check out the bookinfo repositories from GitHub.
 
 ```sh
 oc login
 oc new-project bookinfo
-git clone https://github.com/rh-tstockwell/bookinfo.git
+mkdir bookinfo
 cd bookinfo
+git clone https://github.com/rh-tstockwell/bookinfo-mongodb.git mongodb
+git clone https://github.com/rh-tstockwell/bookinfo-ratings.git ratings
+git clone https://github.com/rh-tstockwell/bookinfo-details.git details
+git clone https://github.com/rh-tstockwell/bookinfo-reviews.git reviews
+git clone https://github.com/rh-tstockwell/bookinfo-mongodb.git productpage
 ```
 
 This will checkout develop branch by default, commands lower down will make sure to deploy the app from master branch code if necessary.
@@ -32,7 +37,12 @@ After the deploy Pod completes and exits, the command will complete, after which
 
 For no reason in particular, I've selected MongoDB as the backend for the Ratings Service over PostgreSQL (the Ratings Service can use either) and will deploy this first so that the other services have a database they can use.
 
-The source of the istio image can be found at [`src/mongodb/Dockerfile`](https://github.com/rh-tstockwell/bookinfo/blob/master/src/mongodb/Dockerfile).
+```console
+cd mongodb
+git checkout openshift3
+```
+
+The source of the istio image can be found at [`Dockerfile`](https://github.com/rh-tstockwell/bookinfo-mongodb/blob/master/Dockerfile).
 Upon investigation, we can see that the Dockerfile extends an existing MongoDB image and pre-populates the database with some data.
 We can implement this more concisely in OpenShift without needing to create a custom image.
 
@@ -65,37 +75,37 @@ $ oc rsh dc/mongodb bash -c 'mongo -u $MONGODB_USER -p $MONGODB_PASSWORD $MONGOD
 
 > **Note:** The environment variables I used to connect to MongoDB above are sourced from the `mongodb` secret and assigned to the Pod by `oc new-app`.
 
-Now that we have a functioning MongoDB database, we need to ensure it is pre-populated with the data listed in [`src/mongodb/ratings_data.json`](https://github.com/rh-tstockwell/bookinfo/blob/master/src/mongodb/ratings_data.json).
+Now that we have a functioning MongoDB database, we need to ensure it is pre-populated with the data listed in [`ratings_data.json`](https://github.com/rh-tstockwell/bookinfo-mongodb/blob/master/ratings_data.json).
 Using a method mentioned in [Using Post Hook to Initialize a Database](https://www.openshift.com/blog/using-post-hook-to-initialize-a-database), we can use the original scripts used by the Dockerfile (with some small modifications) to populate our database after the Pod starts by using a [Pod-based lifecycle hook](https://docs.openshift.com/container-platform/3.11/dev_guide/deployments/deployment_strategies.html#pod-based-lifecycle-hook).
 
-We are going to have to make the following changes to [`src/mongodb/script.sh`](https://github.com/rh-tstockwell/bookinfo/blob/master/src/mongodb/script.sh) for it to work in our lifecycle hook:
+We are going to have to make the following changes to [`script.sh`](https://github.com/rh-tstockwell/bookinfo-mongodb/blob/master/script.sh) for it to work in our lifecycle hook:
 
 - Enable the MongoDB Red Hat Software Collection to access the MongoDB binaries
 - Connect to our MongoDB instance using the appropriate environment variables
 - Handle duplicate values on import using [`--upsertFields`](https://docs.mongodb.com/manual/reference/program/mongoimport/#cmdoption-mongoimport-upsertfields) since our script will be run after every deployment.
 
-View the updated script [here](https://github.com/rh-tstockwell/bookinfo/blob/blog/2/mongodb/src/mongodb/script.sh).
+View the updated script [here](https://github.com/rh-tstockwell/bookinfo/blob/migrating-apps-v3/1.0/script.sh).
 
 Now we need to get the script and data mounted into the mongodb Pod so that we can run them when the Pod starts.
 The best way to do this is using a [`ConfigMap`](https://docs.openshift.com/container-platform/3.11/dev_guide/configmaps.html).
 
 ```console
-$ oc create cm mongodb-scripts --from-file=src/mongodb/script.sh --from-file=src/mongodb/ratings_data.json
+$ oc create cm mongodb-scripts --from-file=script.sh --from-file=ratings_data.json
 configmap/mongodb-scripts created
 ```
 
 Now that we've created the ConfigMap, we can mount it into the Pod as a volume and set up a Post Lifecycle Hook that uses the script.
 
-View the patch [here](https://github.com/rh-tstockwell/bookinfo/blob/blog/2/mongodb/src/mongodb/patches/1-dc-hook.yml).
+View the patch [here](https://github.com/rh-tstockwell/bookinfo-mongodb/blob/migrating-apps-v3/1.0/.k8s/patches/1-dc-hook.yml).
 
 ```console
-$ oc patch dc mongodb -p "$(cat src/mongodb/patches/1-dc-hook.yml)"
+$ oc patch dc mongodb -p "$(cat.k8s/patches/1-dc-hook.yml)"
 deploymentconfig.apps.openshift.io/mongodb patched
 ```
 
 > **Note:** The extra `sleep` command in the lifecycle hook command gives the MongoDB service a chance to start up successfully before the script runs.
 
-After the rollout succeeds, we can query the MongoDB `ratings` collection to check that it has been populated with the data in [`src/mongodb/ratings_data.json`](https://github.com/rh-tstockwell/bookinfo/blob/master/src/mongodb/patches/1-dc-hook.yml).
+After the rollout succeeds, we can query the MongoDB `ratings` collection to check that it has been populated with the data in [`ratings_data.json`](https://github.com/rh-tstockwell/bookinfo/blob/master/.k8s/patches/1-dc-hook.yml).
 
 ```console
 $ oc rsh dc/mongodb bash -c 'mongo -u $MONGODB_USER -p $MONGODB_PASSWORD $MONGODB_DATABASE --quiet --eval "db.ratings.find()"'
@@ -107,10 +117,15 @@ And there it is, a pre-populated MongoDB database running on OpenShift!
 
 ## Ratings Service (NodeJS)
 
+```console
+cd ../ratings
+git checkout openshift3
+```
+
 - Initial build from `master` with nodejs s2i
 
 ```console
-$ oc new-app 'nodejs~https://github.com/rh-tstockwell/bookinfo.git#master' --context-dir src/ratings --name ratings
+$ oc new-app 'nodejs~https://github.com/rh-tstockwell/bookinfo-ratings.git#master' --name ratings
 --> Found image 0d01232 (7 months old) in image stream "openshift/nodejs" under tag "10" for "nodejs"
 ...
 --> Success
@@ -121,7 +136,7 @@ $ oc status
 ...
 svc/ratings - x.x.x.x:8080
   dc/ratings deploys istag/ratings:latest <-
-    bc/ratings source builds https://github.com/rh-tstockwell/bookinfo.git on openshift/nodejs:10
+    bc/ratings source builds https://github.com/rh-tstockwell/bookinfo-ratings.git on openshift/nodejs:10
     deployment #1 deployed 2 minutes ago - 0/1 pods (warning: 2 restarts)
 
 Errors:
@@ -167,7 +182,7 @@ var port = parseInt(process.argv[2])
 - View the patch.
 
 ```console
-$ oc patch bc ratings -p "$(cat src/ratings/patches/1-bc-ref.yml)"
+$ oc patch bc ratings -p "$(cat .k8s/patches/1-bc-ref.yml)"
 buildconfig.build.openshift.io/ratings patched
 ```
 
@@ -185,7 +200,7 @@ $ oc status
 ...
 svc/ratings - x.x.x.x:8080
   dc/ratings deploys istag/ratings:latest <-
-    bc/ratings source builds https://github.com/rh-tstockwell/bookinfo.git#blog/2/ratings on openshift/nodejs:10
+    bc/ratings source builds https://github.com/rh-tstockwell/bookinfo-ratings.git#migratings-apps-v3/1.0 on openshift/nodejs:10
     deployment #2 deployed about a minute ago - 1 pod
     deployment #1 deployed 3 hours ago
 ...
@@ -208,7 +223,7 @@ $ curl "http://$host/ratings/1"
 - `MONGO_DB_URL`: `mongodb.bookinfo.svc:27017` -> due to the default [DNS-based service discovery](https://docs.openshift.com/container-platform/3.11/architecture/networking/networking.html#architecture-additional-concepts-openshift-dns) for services
 
 ```console
-$ oc patch dc ratings -p "$(cat src/ratings/patches/2-dc-mongo.yml)"
+$ oc patch dc ratings -p "$(cat .k8s/patches/2-dc-mongo.yml)"
 deploymentconfig.apps.openshift.io/ratings patched
 ```
 
@@ -233,10 +248,10 @@ var url = `mongodb://${username}:${password}@${host}/${database}`
 - Now, update the deployment to add the new envvars we defined, and update the build to point to the updated code
 
 ```console
-$ oc patch dc ratings -p "$(cat src/ratings/patches/3-dc-mongo.yml)"
+$ oc patch dc ratings -p "$(cat.k8s/patches/3-dc-mongo.yml)"
 deploymentconfig.apps.openshift.io/ratings patched
 
-$ oc patch bc ratings -p "$(cat src/ratings/patches/4-bc-ref.yml)"
+$ oc patch bc ratings -p "$(cat.k8s/patches/4-bc-ref.yml)"
 buildconfig.build.openshift.io/ratings patched
 
 $ oc start-build ratings
@@ -250,7 +265,7 @@ $ oc status
 ...
 http://ratings-bookinfo.apps.cluster.example.com to pod port 8080-tcp (svc/ratings)
   dc/ratings deploys istag/ratings:latest <-
-    bc/ratings source builds https://github.com/rh-tstockwell/bookinfo.git#blog/2/ratings-2 on openshift/nodejs:10
+    bc/ratings source builds https://github.com/rh-tstockwell/bookinfo-ratings.git#migrating-apps-v3/1.0 on openshift/nodejs:10
     deployment #4 deployed about a minute ago - 1 pod
     deployment #3 deployed 7 minutes ago
     deployment #2 deployed about an hour ago
@@ -265,10 +280,15 @@ $ curl "http://$host/ratings/1"
 
 ## Details Service (Ruby)
 
+```console
+cd ../details
+git checkout openshift3
+```
+
 - Start with initial deploy to OpenShift
 
 ```console
-$ oc new-app 'ruby~https://github.com/rh-tstockwell/bookinfo.git#master' --context-dir src/details --name details
+$ oc new-app 'ruby~https://github.com/rh-tstockwell/bookinfo-details.git#master' --name details
 --> Found image 18a91a0 (11 months old) in image stream "openshift/ruby" under tag "2.5" for "ruby"
 ...
 --> Success
@@ -276,7 +296,7 @@ $ oc new-app 'ruby~https://github.com/rh-tstockwell/bookinfo.git#master' --conte
 $ oc status
 svc/details - x.x.x.x:8080
   dc/details deploys istag/details:latest <-
-    bc/details source builds https://github.com/rh-tstockwell/bookinfo.git#master on openshift/ruby:2.5
+    bc/details source builds https://github.com/rh-tstockwell/bookinfo-details.git#master on openshift/ruby:2.5
     deployment #1 deployed 2 minutes ago - 0/1 pods (warning: 4 restarts)
 ...
 Errors:
@@ -303,7 +323,7 @@ ERROR: Rubygem Rack is not installed in the present image.
 - Update the git ref to point to one I've already completed
 
 ```console
-$ oc patch bc details -p "$(cat src/details/patches/1-bc-ref.yml)"
+$ oc patch bc details -p "$(cat .k8s/patches/1-bc-ref.yml)"
 buildconfig.build.openshift.io/details patched
 
 $ oc start-build details
@@ -312,7 +332,7 @@ build.build.openshift.io/details-2 started
 $ oc status
 svc/details - x.x.x.x:8080
   dc/details deploys istag/details:latest <-
-    bc/details source builds https://github.com/rh-tstockwell/bookinfo.git#blog/2/details on openshift/ruby:2.5
+    bc/details source builds https://github.com/rh-tstockwell/bookinfo-details.git#migratings-apps-v3/1.0 on openshift/ruby:2.5
     deployment #2 running for 28 seconds - 1 pod
     deployment #1 deployed 18 minutes ago
 ...
@@ -321,7 +341,7 @@ svc/details - x.x.x.x:8080
 - Looks like it worked, let's check the api
 
 ```console
-$ oc expose svc details 
+$ oc expose svc details
 route.route.openshift.io/details exposed
 
 $ host="$(oc get route details --template '{{.spec.host}}')"
@@ -330,6 +350,11 @@ $ curl "http://$host/details/1"
 ```
 
 ## Reviews Service (Java + Gradle)
+
+```console
+cd ../reviews
+git checkout openshift3
+```
 
 - Have a JEE Application, needs to run in an JEE server container - e.g. wildfly
 - if it doesn't exist (use `oc get is -n openshift | grep wildfly` to check), either ask your ocp admin to add it (https://github.com/wildfly/wildfly-s2i) or create the imagestreams locally in your project yourself
@@ -347,7 +372,7 @@ template.template.openshift.io/wildfly-s2i-chained-build-template created
 - Run oc new-app
 
 ``` console
-$ oc new-app 'wildfly~https://github.com/rh-tstockwell/bookinfo.git#master' --context-dir src/reviews --name reviews
+$ oc new-app 'wildfly~https://github.com/rh-tstockwell/bookinfo-reviews.git#master' --name reviews
 --> Found image bdf6490 (4 weeks old) in image stream "bookinfo/wildfly" under tag "latest" for "wildfly"
 ...
 --> Success
@@ -356,7 +381,7 @@ $ oc status
 ...
 svc/reviews - 172.30.88.245 ports 8080, 8778
   dc/reviews deploys istag/reviews:latest <-
-    bc/reviews source builds https://github.com/rh-tstockwell/bookinfo.git#master on istag/wildfly:latest
+    bc/reviews source builds https://github.com/rh-tstockwell/bookinfo-reviews.git#master on istag/wildfly:latest
     deployment #1 deployed 2 minutes ago - 1 pod
 ```
 
@@ -406,7 +431,7 @@ INFO Copying deployments from . to /deployments...
 - Update our ref to these changes
 
 ```console
-$ oc patch bc reviews -p "$(cat src/reviews/patches/1-bc-ref.yml)"
+$ oc patch bc reviews -p "$(cat .k8s/patches/1-bc-ref.yml)"
 buildconfig.build.openshift.io/reviews patched
 
 $ oc start-build reviews
@@ -454,7 +479,7 @@ $ curl "http://$host/reviews-application-1.0/reviews/1"
 - Now update the build git ref to use these changes as well
 
 ```console
-$ oc patch bc reviews -p "$(cat src/reviews/patches/2-bc-ref.yml)"
+$ oc patch bc reviews -p "$(cat .k8s/patches/2-bc-ref.yml)"
 buildconfig.build.openshift.io/reviews patched
 
 $ oc start-build reviews
@@ -468,10 +493,15 @@ $ curl "http://$host/reviews/1"
 
 ## Product Page (Python)
 
+```console
+cd ../productpage
+git checkout openshift3
+```
+
 - try oc new-app
 
 ```console
-$ oc new-app 'python~https://github.com/rh-tstockwell/bookinfo.git#master' --context-dir src/productpage --name productpage
+$ oc new-app 'python~https://github.com/rh-tstockwell/bookinfo-productpage.git#master' --name productpage
 --> Found image 75e59ae (11 months old) in image stream "openshift/python" under tag "3.6" for "python"
 ...
 --> Success
@@ -480,7 +510,7 @@ $ oc status
 ...
 svc/productpage - x.x.x.x:8080
   dc/productpage deploys istag/productpage:latest <-
-    bc/productpage source builds https://github.com/rh-tstockwell/bookinfo.git#master on openshift/python:3.6
+    bc/productpage source builds https://github.com/rh-tstockwell/bookinfo-productpage.git#master on openshift/python:3.6
     deployment #1 failed 18 minutes ago: config change
 ...
 
@@ -495,7 +525,7 @@ Please set either APP_MODULE, APP_FILE or APP_SCRIPT environment variables, or c
 - apply patch to new ref
 
 ```console
-$ oc patch bc productpage -p "$(cat src/productpage/.k8s/patches/1-bc-ref.yml)"
+$ oc patch bc productpage -p "$(cat .k8s/patches/1-bc-ref.yml)"
 buildconfig.build.openshift.io/productpage patched
 
 $ oc start-build productpage
@@ -505,7 +535,7 @@ $ oc status
 ...
 svc/productpage - x.x.x.x:8080
   dc/productpage deploys istag/productpage:latest <-
-    bc/productpage source builds https://github.com/rh-tstockwell/bookinfo.git#blog/2/productpage-1 on openshift/python:3.6
+    bc/productpage source builds https://github.com/rh-tstockwell/bookinfo-productpage.git#migrating-apps-v3/1.0 on openshift/python:3.6
     deployment #3 deployed about a minute ago - 1 pod
     deployment #2 deployed 18 minutes ago
     deployment #1 failed 39 minutes ago: config change
@@ -539,10 +569,10 @@ DEBUG:urllib3.connectionpool:Starting new HTTP connection (1): reviews:9080
 - Apply the patch to the bc for latest version as well as patch to the dc for the services domain envvar (this changes per env so should be in dc not `.s2i/environment`)
 
 ```console
-$ oc patch dc productpage -p "$(cat src/productpage/.k8s/patches/2-dc-domain.yml)"
+$ oc patch dc productpage -p "$(cat .k8s/patches/2-dc-domain.yml)"
 deploymentconfig.apps.openshift.io/productpage patched
 
-$ oc patch bc productpage -p "$(cat src/productpage/.k8s/patches/3-bc-ref.yml)"
+$ oc patch bc productpage -p "$(cat .k8s/patches/3-bc-ref.yml)"
 buildconfig.build.openshift.io/productpage patched
 
 $ oc start-build productpage
@@ -551,3 +581,16 @@ build.build.openshift.io/productpage-3 started
 
 - Test it out again in the browser
 - et voilà
+
+## To Do
+
+- Double check repo links
+- Make reviews use ratings service
+- Link to actual istio documentation for envvars etc for the actual services
+
+```console
+git co -b productpage master
+git filter-branch -f --prune-empty --subdirectory-filter samples/bookinfo/src/productpage productpage
+git remote add productpage git@rh-tstockwell.github.com:rh-tstockwell/bookinfo-productpage.git
+git push productpage productpage:master
+```
